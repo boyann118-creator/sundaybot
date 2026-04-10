@@ -9,7 +9,7 @@ from telegram.ext import (
 
 # --- 1. 基礎配置 ---
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-ADMIN_IDS = [5558898787, 7549117882, 6914258528, 7309768391, 7156620562]
+ADMIN_IDS = [5558898787, 7549117882, 6914258528, 7309768391, 7156620562, 7738262619]
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/boyann118-creator/sundaybot/refs/heads/main/groups.json"
 
