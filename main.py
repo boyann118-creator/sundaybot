@@ -66,19 +66,18 @@ async def group_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     g_name = query.data.replace("v_", "")
     mems = [m for m in DATA_CACHE.get("members", []) if m['g_name'] == g_name]
     
-    # --- 重點修改部分：只顯示 remark (名稱)，不再顯示 chat_id ---
     text = f"📂 **分組：{g_name}**\n\n成員清單："
     if not mems:
         text += "\n(空)"
     else:
         for m in mems:
-            text += f"\n• {m['remark']}" # 這裡刪掉了原本顯示 ID 的部分
+            text += f"\n• {m['remark']}"
     
     kb = [[InlineKeyboardButton("⬅️ 返回列表", callback_data='list_g')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return MAIN_STATE
 
-# --- 群發流程 ---
+# --- 群發流程 (併發加速優化) ---
 
 async def bc_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -101,14 +100,34 @@ async def bc_get_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bc_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
     g_name = context.user_data.get('bc_target')
     mems = [m for m in DATA_CACHE.get("members", []) if m['g_name'] == g_name]
-    success = 0
-    status_msg = await update.message.reply_text("⏳ 正在群發中...")
+    
+    if not mems:
+        await update.message.reply_text("❌ 該分組下沒有成員，無法發送。")
+        return BCAST_MSG
+
+    status_msg = await update.message.reply_text(f"🚀 正在同時發送至 {len(mems)} 個目標...")
+    
+    # 創建併發任務列表
+    tasks = []
     for m in mems:
-        try:
-            await context.bot.copy_message(chat_id=m['chat_id'], from_chat_id=update.message.chat_id, message_id=update.message.message_id)
-            success += 1
-        except: continue
-    await status_msg.edit_text(f"✅ **發送任務完成！**\n\n📍 分組：{g_name}\n🎉 成功：{success}/{len(mems)}\n\n**可繼續發送內容，或輸入 /start 返回。**")
+        tasks.append(
+            context.bot.copy_message(
+                chat_id=m['chat_id'], 
+                from_chat_id=update.message.chat_id, 
+                message_id=update.message.message_id
+            )
+        )
+    
+    # 使用 gather 同時執行所有發送任務
+    # return_exceptions=True 確保即使某個群發送失敗（比如機器人被踢），也不會影響其他任務執行
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    success = sum(1 for r in results if not isinstance(r, Exception))
+    
+    await status_msg.edit_text(
+        f"✅ **併發發送任務完成！**\n\n📍 分組：{g_name}\n🎉 成功：{success}/{len(mems)}\n\n"
+        "**可繼續發送內容，或輸入 /start 返回。**"
+    )
     return BCAST_MSG
 
 # --- 啟動與 Web 服務 ---
