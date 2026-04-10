@@ -7,7 +7,7 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes, ConversationHandler
 )
 
-# --- 1. 基礎配置 ---
+# --- 基礎配置 ---
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 ADMIN_IDS = [5558898787, 7549117882, 6914258528, 7309768391, 7156620562]
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -15,7 +15,7 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 # 定義流程狀態
 (MAIN_STATE, ADD_GNAME, ADD_ID, ADD_REMARK, RENAME_G) = range(5)
 
-# --- 2. 數據庫 ---
+# --- 數據庫 ---
 def db_op(sql, params=(), is_select=False):
     with sqlite3.connect('bot_data.db') as conn:
         conn.row_factory = sqlite3.Row
@@ -27,7 +27,7 @@ def init_db():
     db_op('CREATE TABLE IF NOT EXISTS group_names (name TEXT PRIMARY KEY)')
     db_op('CREATE TABLE IF NOT EXISTS members (g_name TEXT, chat_id TEXT, remark TEXT, UNIQUE(g_name, chat_id))')
 
-# --- 3. 核心功能函數 ---
+# --- 核心邏輯 ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return ConversationHandler.END
@@ -44,26 +44,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # 分組列表
 async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
+    if update.callback_query: await update.callback_query.answer()
     rows = db_op("SELECT name FROM group_names", is_select=True)
     kb = [[InlineKeyboardButton(f"📂 {r['name']}", callback_data=f"v_{r['name']}")] for r in rows]
     kb.append([InlineKeyboardButton("➕ 創建新分組", callback_data='create_g')])
     kb.append([InlineKeyboardButton("⬅️ 返回主選單", callback_data='to_start')])
-    await update.callback_query.edit_message_text("🗂️ **分組列表**：", reply_markup=InlineKeyboardMarkup(kb))
+    
+    msg_text = "🗂️ **分組列表**："
+    if update.callback_query:
+        await update.callback_query.edit_message_text(msg_text, reply_markup=InlineKeyboardMarkup(kb))
+    else:
+        await update.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(kb))
     return MAIN_STATE
-
-# 創建分組 - 第一步
-async def create_group_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text("✍️ 請發送 **新分組的名稱**：")
-    return ADD_GNAME
-
-# 創建分組 - 第二步（保存）
-async def save_new_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.message.text.strip()
-    db_op("INSERT OR IGNORE INTO group_names VALUES (?)", (name,))
-    await update.message.reply_text(f"✅ 分組「{name}」已創建。")
-    return await start(update, context) # 強制返回主選單
 
 # 分組詳情
 async def group_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -79,59 +71,46 @@ async def group_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"\n• {m['remark']} (`{m['chat_id']}`)"
         kb.append([InlineKeyboardButton(f"🗑️ 移除 {m['remark']}", callback_data=f"rm_{m['chat_id']}")])
     
-    kb.append([InlineKeyboardButton("➕ 添加群組", callback_data='add_m_flow')])
+    kb.append([InlineKeyboardButton("➕ 添加成員 (錄入 ID)", callback_data='add_m_flow')])
     kb.append([InlineKeyboardButton("📝 修改分組名", callback_data='ren_g_flow')])
-    kb.append([InlineKeyboardButton("🔥 刪除分組", callback_data='del_g_all')])
-    kb.append([InlineKeyboardButton("⬅️ 返回", callback_data='list_g')])
+    kb.append([InlineKeyboardButton("🔥 刪除整個分組", callback_data='del_g_all')])
+    kb.append([InlineKeyboardButton("⬅️ 返回列表", callback_data='list_g')])
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return MAIN_STATE
 
-# 添加成員流程
-async def add_mem_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- 添加成員：這裡就是錄入 ID 的地方 ---
+async def add_mem_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await update.callback_query.edit_message_text(f"👉 **分組：{context.user_data['active_g']}**\n請發送群組 **ID**：")
+    await update.callback_query.edit_message_text(f"👉 **分組：{context.user_data['active_g']}**\n請現在發送群組 **ID** (必須帶 -)：")
     return ADD_ID
 
-async def add_mem_remark(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_mem_id_rcvd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.message.text.strip()
     if not cid.startswith('-'):
-        await update.message.reply_text("❌ ID 必須以 - 開頭，請重新輸入：")
+        await update.message.reply_text("❌ ID 格式錯誤！必須以 `-` 開頭，請重新輸入：")
         return ADD_ID
     context.user_data['temp_cid'] = cid
-    await update.message.reply_text(f"✅ ID 已記錄。\n**請發送該群的備註名稱：**")
+    await update.message.reply_text(f"✅ ID 已記錄：`{cid}`\n**請現在發送該群的「備註名稱」：**")
     return ADD_REMARK
 
-async def add_mem_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_mem_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remark = update.message.text.strip()
     db_op("INSERT OR REPLACE INTO members VALUES (?, ?, ?)", 
           (context.user_data['active_g'], context.user_data['temp_cid'], remark))
-    await update.message.reply_text(f"✨ 已保存：{remark}")
+    await update.message.reply_text(f"✅ 已成功錄入：{remark}")
     return await start(update, context)
 
-# 刪除單個成員
-async def remove_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cid = update.callback_query.data.replace("rm_", "")
-    db_op("DELETE FROM members WHERE chat_id=? AND g_name=?", (cid, context.user_data['active_g']))
-    await update.callback_query.answer("已移除")
-    return await group_detail(update, context)
+# --- 刪除分組 (修復卡住問題) ---
+async def delete_group_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    g_name = context.user_data.get('active_g')
+    db_op("DELETE FROM group_names WHERE name=?", (g_name,))
+    db_op("DELETE FROM members WHERE g_name=?", (g_name,))
+    await update.callback_query.answer(f"分組 {g_name} 已刪除")
+    # 關鍵：刪除後直接調用 list_groups 返回列表狀態
+    return await list_groups(update, context)
 
-# 修改分組名
-async def rename_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text(f"✍️ 請輸入分組「{context.user_data['active_g']}」的新名稱：")
-    return RENAME_G
-
-async def rename_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    new_n = update.message.text.strip()
-    old_n = context.user_data['active_g']
-    db_op("INSERT OR IGNORE INTO group_names VALUES (?)", (new_n,))
-    db_op("UPDATE members SET g_name=? WHERE g_name=?", (new_n, old_n))
-    db_op("DELETE FROM group_names WHERE name=?", (old_n,))
-    await update.message.reply_text(f"✅ 已改名為 {new_n}")
-    return await start(update, context)
-
-# --- 4. 啟動 ---
+# --- 啟動 ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot Active"
@@ -149,16 +128,14 @@ def main():
                 CallbackQueryHandler(list_groups, pattern='^list_g$'),
                 CallbackQueryHandler(start, pattern='^to_start$'),
                 CallbackQueryHandler(group_detail, pattern='^v_'),
-                CallbackQueryHandler(create_group_start, pattern='^create_g$'),
-                CallbackQueryHandler(add_mem_id, pattern='^add_m_flow$'),
-                CallbackQueryHandler(rename_start, pattern='^ren_g_flow$'),
-                CallbackQueryHandler(remove_member, pattern='^rm_'),
-                CallbackQueryHandler(lambda u,c: (db_op("DELETE FROM group_names WHERE name=?", (c.user_data['active_g'],)), db_op("DELETE FROM members WHERE g_name=?", (c.user_data['active_g'],))) or list_groups(u,c), pattern='^del_g_all$'),
+                CallbackQueryHandler(lambda u,c: u.callback_query.edit_message_text("請發送新分組名稱：") or ADD_GNAME, pattern='^create_g$'),
+                CallbackQueryHandler(add_mem_start, pattern='^add_m_flow$'),
+                CallbackQueryHandler(delete_group_confirm, pattern='^del_g_all$'),
+                CallbackQueryHandler(lambda u,c: (db_op("DELETE FROM members WHERE chat_id=? AND g_name=?", (u.callback_query.data.replace("rm_",""), c.user_data['active_g']))) or group_detail(u,c), pattern='^rm_'),
             ],
-            ADD_GNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_new_group)],
-            ADD_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_mem_remark)],
-            ADD_REMARK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_mem_save)],
-            RENAME_G: [MessageHandler(filters.TEXT & ~filters.COMMAND, rename_save)],
+            ADD_GNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: db_op("INSERT OR IGNORE INTO group_names VALUES (?)", (u.message.text.strip(),)) or start(u,c))],
+            ADD_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_mem_id_rcvd)],
+            ADD_REMARK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_mem_final)],
         },
         fallbacks=[CommandHandler("start", start)],
         allow_reentry=True
