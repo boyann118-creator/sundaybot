@@ -9,7 +9,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 
 # --- 配置區 ---
 # 填入你和其它管理員的 Telegram User ID (整數)
-ADMIN_IDS = [12345678, 87654321] 
+ADMIN_IDS = [5558898787, 87654321] 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 # 狀態定義
