@@ -13,7 +13,8 @@ ADMIN_IDS = [5558898787, 7549117882, 6914258528, 7309768391, 7156620562, 7738262
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/boyann118-creator/sundaybot/refs/heads/main/groups.json"
 
-(MAIN_STATE, BCAST_GROUP, BCAST_MSG) = range(3)
+# 狀態定義：增加一個 BCAST_TEMP_INPUT
+(MAIN_STATE, BCAST_GROUP, BCAST_TEMP_INPUT, BCAST_MSG) = range(4)
 
 DATA_CACHE = {"groups": [], "members": []}
 
@@ -47,6 +48,88 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return MAIN_STATE
 
+# --- 群發流程優化 ---
+
+async def bc_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    groups = DATA_CACHE.get("groups", [])
+    
+    # 構建按鈕：原有分組 + 臨時群組選項
+    kb = [[InlineKeyboardButton(f"🚀 發送至：{name}", callback_data=f"bcg_{name}")] for name in groups]
+    kb.append([InlineKeyboardButton("➕ 使用臨時群組 (手動輸入)", callback_data='bc_temp')])
+    kb.append([InlineKeyboardButton("⬅️ 返回", callback_data='to_start')])
+    
+    await update.callback_query.edit_message_text("📢 **選擇群發目標：**", reply_markup=InlineKeyboardMarkup(kb))
+    return BCAST_GROUP
+
+# 處理點擊“臨時群組”
+async def bc_temp_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text("⌨️ **請輸入群組序号/ID**\n\n多個 ID 請用 **空格** 或 **逗號** 隔開。\n例如：`-100123, -100456 789012`")
+    return BCAST_TEMP_INPUT
+
+# 處理臨時 ID 的輸入
+async def bc_temp_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_text = update.message.text
+    # 將逗號替換為空格，然後分割，過濾掉空字符串
+    ids = raw_text.replace(',', ' ').split()
+    
+    if not ids:
+        await update.message.reply_text("❌ 未檢測到有效的 ID，請重新輸入：")
+        return BCAST_TEMP_INPUT
+    
+    # 存入 context.user_data 供後續發送使用
+    context.user_data['is_temp'] = True
+    context.user_data['temp_ids'] = ids
+    
+    await update.message.reply_text(f"✅ 已記錄 {len(ids)} 個臨時目標。\n\n**現在請發送群發內容：**")
+    return BCAST_MSG
+
+async def bc_get_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    g_name = update.callback_query.data.replace("bcg_", "")
+    context.user_data['bc_target'] = g_name
+    context.user_data['is_temp'] = False
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text(f"📝 **目標分組：{g_name}**\n\n請發送群發內容：")
+    return BCAST_MSG
+
+async def bc_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 判斷是發送給 GitHub 分組還是臨時群組
+    if context.user_data.get('is_temp'):
+        target_ids = context.user_data.get('temp_ids', [])
+        display_name = "臨時群組"
+    else:
+        g_name = context.user_data.get('bc_target')
+        display_name = g_name
+        mems = [m for m in DATA_CACHE.get("members", []) if m['g_name'] == g_name]
+        target_ids = [m['chat_id'] for m in mems]
+    
+    if not target_ids:
+        await update.message.reply_text("❌ 目標列表為空，無法發送。")
+        return BCAST_MSG
+
+    status_msg = await update.message.reply_text(f"🚀 正在同時發送至 {len(target_ids)} 個目標...")
+    
+    tasks = []
+    for cid in target_ids:
+        tasks.append(
+            context.bot.copy_message(
+                chat_id=cid, 
+                from_chat_id=update.message.chat_id, 
+                message_id=update.message.message_id
+            )
+        )
+    
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    success = sum(1 for r in results if not isinstance(r, Exception))
+    
+    await status_msg.edit_text(
+        f"✅ **併發發送任務完成！**\n\n📍 目標：{display_name}\n🎉 成功：{success}/{len(target_ids)}\n\n"
+        "**可繼續發送內容，或輸入 /start 返回。**"
+    )
+    return BCAST_MSG
+
+# --- 基礎函數 (保持不變) ---
 async def list_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     groups = DATA_CACHE.get("groups", [])
@@ -65,72 +148,14 @@ async def group_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     g_name = query.data.replace("v_", "")
     mems = [m for m in DATA_CACHE.get("members", []) if m['g_name'] == g_name]
-    
     text = f"📂 **分組：{g_name}**\n\n成員清單："
-    if not mems:
-        text += "\n(空)"
+    if not mems: text += "\n(空)"
     else:
-        for m in mems:
-            text += f"\n• {m['remark']}"
-    
+        for m in mems: text += f"\n• {m['remark']}"
     kb = [[InlineKeyboardButton("⬅️ 返回列表", callback_data='list_g')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return MAIN_STATE
 
-# --- 群發流程 (併發加速優化) ---
-
-async def bc_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    groups = DATA_CACHE.get("groups", [])
-    if not groups:
-        await update.callback_query.edit_message_text("❌ 數據庫為空。")
-        return MAIN_STATE
-    kb = [[InlineKeyboardButton(f"🚀 發送至：{name}", callback_data=f"bcg_{name}")] for name in groups]
-    kb.append([InlineKeyboardButton("⬅️ 返回", callback_data='to_start')])
-    await update.callback_query.edit_message_text("📢 **選擇群發目標分組：**", reply_markup=InlineKeyboardMarkup(kb))
-    return BCAST_GROUP
-
-async def bc_get_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    g_name = update.callback_query.data.replace("bcg_", "")
-    context.user_data['bc_target'] = g_name
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text(f"📝 **目標分組：{g_name}**\n\n請發送群發內容：")
-    return BCAST_MSG
-
-async def bc_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    g_name = context.user_data.get('bc_target')
-    mems = [m for m in DATA_CACHE.get("members", []) if m['g_name'] == g_name]
-    
-    if not mems:
-        await update.message.reply_text("❌ 該分組下沒有成員，無法發送。")
-        return BCAST_MSG
-
-    status_msg = await update.message.reply_text(f"🚀 正在同時發送至 {len(mems)} 個目標...")
-    
-    # 創建併發任務列表
-    tasks = []
-    for m in mems:
-        tasks.append(
-            context.bot.copy_message(
-                chat_id=m['chat_id'], 
-                from_chat_id=update.message.chat_id, 
-                message_id=update.message.message_id
-            )
-        )
-    
-    # 使用 gather 同時執行所有發送任務
-    # return_exceptions=True 確保即使某個群發送失敗（比如機器人被踢），也不會影響其他任務執行
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    success = sum(1 for r in results if not isinstance(r, Exception))
-    
-    await status_msg.edit_text(
-        f"✅ **併發發送任務完成！**\n\n📍 分組：{g_name}\n🎉 成功：{success}/{len(mems)}\n\n"
-        "**可繼續發送內容，或輸入 /start 返回。**"
-    )
-    return BCAST_MSG
-
-# --- 啟動與 Web 服務 ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot Online"
@@ -140,6 +165,7 @@ def main():
     sync_from_github()
     Thread(target=run_web).start()
     app_tg = Application.builder().token(TOKEN).build()
+    
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -150,8 +176,16 @@ def main():
                 CallbackQueryHandler(bc_select, pattern='^start_bc$'),
                 CallbackQueryHandler(lambda u,c: (u.callback_query.answer("數據已刷新") if sync_from_github() else u.callback_query.answer("刷新失敗")) or start(u,c), pattern='^sync_now$'),
             ],
-            BCAST_GROUP: [CallbackQueryHandler(bc_get_msg, pattern='^bcg_')],
-            BCAST_MSG: [MessageHandler(filters.ALL & ~filters.COMMAND, bc_do)],
+            BCAST_GROUP: [
+                CallbackQueryHandler(bc_get_msg, pattern='^bcg_'),
+                CallbackQueryHandler(bc_temp_prompt, pattern='^bc_temp$')
+            ],
+            BCAST_TEMP_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, bc_temp_save)
+            ],
+            BCAST_MSG: [
+                MessageHandler(filters.ALL & ~filters.COMMAND, bc_do)
+            ],
         },
         fallbacks=[CommandHandler("start", start)],
         allow_reentry=True
