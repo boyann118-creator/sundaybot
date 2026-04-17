@@ -81,7 +81,7 @@ async def bc_temp_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display_text += f"<b>{i}.</b> {m['remark']} -- <i>{m['g_name']}</i>\n"
 
     context.user_data['temp_id_map'] = temp_map
-    display_text += "\n---\n⌨️ **請輸入群組序號**\n或發送 /start 取消操作。"
+    display_text += "\n---\n⌨️ **請輸入群組序號，用空格隔开**\n或發送 /start 取消操作。"
     
     # 這裡沒法放按鈕，因為用戶需要輸入文字，Telegram 規範建議引導用戶直接發送指令或文字
     await update.callback_query.edit_message_text(display_text, parse_mode="HTML")
