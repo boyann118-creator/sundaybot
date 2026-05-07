@@ -16,7 +16,7 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 GH_TOKEN = os.getenv("GH_PAT_TOKEN") 
 GH_REPO = "boyann118-creator/sunday-bot-data"
 GH_PATH = "groups.json"
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "") 
+RENDER_EXTERNAL_URL = "https://sundaybot.onrender.com"
 
 # 状态机常量
 (MAIN_STATE, BCAST_GROUP, BCAST_MSG, MANAGE_MEMBER_SELECT, MEMBER_ACTION, 
