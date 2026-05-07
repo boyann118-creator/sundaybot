@@ -7,20 +7,19 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes, ConversationHandler
 )
 
-# --- 1. 基础配置与权限检查 ---
+# --- 1. 基础配置 ---
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# 请确保你的 ID 在这个列表里
 ADMIN_IDS = [5558898787, 7549117882, 6914258528, 7309768391, 7156620562, 7738262619]
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GH_TOKEN = os.getenv("GH_PAT_TOKEN") 
 GH_REPO = "boyann118-creator/sunday-bot-data"
 GH_PATH = "groups.json"
 
-(MAIN_STATE, BCAST_GROUP, BCAST_MSG, SET_GROUP_NAME) = range(4)
+(MAIN_STATE, BCAST_GROUP, BCAST_MSG, MANAGE_MEMBER_SELECT, MEMBER_ACTION) = range(5)
 DATA_CACHE = {"groups": ["未分类"], "members": []}
 
-# --- 2. GitHub 核心逻辑 (带详细反馈) ---
+# --- 2. GitHub 核心逻辑 ---
 
 def sync_from_github():
     global DATA_CACHE
@@ -34,109 +33,69 @@ def sync_from_github():
             DATA_CACHE = json.loads(content)
             print(f"[{time.strftime('%H:%M:%S')}] 🔄 同步成功 | 数据库成员数: {len(DATA_CACHE['members'])}")
             return json_data['sha']
-        print(f"[{time.strftime('%H:%M:%S')}] ❌ 同步失败: {resp.status_code} (请检查环境变量 GH_PAT_TOKEN)")
         return None
     except Exception as e:
-        print(f"[{time.strftime('%H:%M:%S')}] ⚠️ 网络异常: {e}")
+        print(f"[{time.strftime('%H:%M:%S')}] ⚠️ 同步异常: {e}")
         return None
 
 def save_to_github():
-    # 强制增加延迟，防止瞬时并发冲突
-    time.sleep(1) 
-    
-    # 1. 物理获取最新 SHA（核心逻辑：写入前必须实时拉取一次）
+    time.sleep(0.5) 
     url = f"https://api.github.com/repos/{GH_REPO}/contents/{GH_PATH}"
     headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-    
     try:
-        # 获取远程最新的 SHA
         get_resp = requests.get(url, headers=headers, timeout=10)
-        if get_resp.status_code != 200:
-            print(f"[{time.strftime('%H:%M:%S')}] 🚫 无法同步 SHA: {get_resp.status_code}")
-            return False
-        
+        if get_resp.status_code != 200: return False
         remote_sha = get_resp.json()['sha']
-        
-        # 2. 准备 payload
         json_str = json.dumps(DATA_CACHE, ensure_ascii=False, indent=2)
         encoded_content = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
-        
         payload = {
             "message": f"Sunday Bot AutoSync - {time.strftime('%H:%M:%S')}",
             "content": encoded_content,
-            "sha": remote_sha, # 使用刚刚拿到的物理 SHA
+            "sha": remote_sha,
             "branch": "main"
         }
-        
-        # 3. 执行写入
         put_resp = requests.put(url, headers=headers, json=payload, timeout=10)
-        
-        if put_resp.status_code in [200, 201]:
-            print(f"[{time.strftime('%H:%M:%S')}] ✅ 物理写入成功，新 Commit: {put_resp.json()['commit']['sha'][:7]}")
-            return True
-        else:
-            print(f"[{time.strftime('%H:%M:%S')}] ❌ 写入失败: {put_resp.text}")
-            return False
-            
+        return put_resp.status_code in [200, 201]
     except Exception as e:
-        print(f"[{time.strftime('%H:%M:%S')}] ⚠️ 严重错误: {e}")
+        print(f"[{time.strftime('%H:%M:%S')}] ⚠️ 写入错误: {e}")
         return False
 
-# --- 3. 指令逻辑：入库与分类 ---
+# --- 3. 增强版群组登记逻辑 ---
 
 async def set_group_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/set_group: 仅仅将群组录入数据库"""
+    """/set_group [自定义名字]: 入库或更新名字"""
     if update.effective_user.id not in ADMIN_IDS: return
     chat = update.effective_chat
-    print(f"[{time.strftime('%H:%M:%S')}] 📩 收到入库请求: {chat.title}")
-
+    
+    # 逻辑1：优先使用用户提供的名字，否则使用群标题
+    custom_name = " ".join(context.args) if context.args else chat.title
+    
     sync_from_github()
     existing = next((m for m in DATA_CACHE['members'] if m['chat_id'] == chat.id), None)
     
     if not existing:
-        DATA_CACHE['members'].append({"chat_id": chat.id, "remark": chat.title, "g_name": "未分类"})
-        if save_to_github():
-            await update.message.reply_text(f"📥 **入库成功**\n群组: {chat.title}\nID: `{chat.id}`\n当前状态: 未分类", parse_mode="Markdown")
-        else:
-            await update.message.reply_text("❌ 入库失败，请检查 Render 日志中的权限报错")
+        DATA_CACHE['members'].append({"chat_id": chat.id, "remark": custom_name, "g_name": "未分类"})
+        msg = f"📥 **入库成功**\n群组: {custom_name}\nID: `{chat.id}`\n当前状态: 未分类"
     else:
-        await update.message.reply_text("ℹ️ 该群组已在数据库中，无需重复录入。")
+        # 逻辑2：如果已登记，则替换名字
+        old_name = existing['remark']
+        existing['remark'] = custom_name
+        msg = f"🔄 **群名已更新**\n原名: {old_name}\n现名: {custom_name}\n状态: {existing['g_name']}"
 
-async def set_group_kind(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/set_kind [名称]: 设置分组"""
-    if update.effective_user.id not in ADMIN_IDS: return
-    if not context.args:
-        await update.message.reply_text("💡 请输入分组名，例如: `/set_kind 海外组`")
-        return
-        
-    new_kind = context.args[0]
-    chat = update.effective_chat
-    print(f"[{time.strftime('%H:%M:%S')}] 🏷️ 正在为群组 {chat.title} 设置分类: {new_kind}")
-
-    sync_from_github()
-    member = next((m for m in DATA_CACHE['members'] if m['chat_id'] == chat.id), None)
-    
-    if member:
-        member['g_name'] = new_kind
-        if new_kind not in DATA_CACHE['groups']:
-            DATA_CACHE['groups'].append(new_kind)
-        
-        if save_to_github():
-            await update.message.reply_text(f"✅ 分组已更新\n群组: {chat.title}\n当前分类: 【{new_kind}】")
+    if save_to_github():
+        await update.message.reply_text(msg, parse_mode="Markdown")
     else:
-        await update.message.reply_text("❌ 请先发送 `/set_group` 将此群加入数据库")
+        await update.message.reply_text("❌ 操作失败，请检查 GitHub 配置")
 
-# --- 4. 管理菜单与群发逻辑 ---
+# --- 4. 私聊控制台：分组与成员管理 ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid not in ADMIN_IDS: return ConversationHandler.END
     
-    print(f"[{time.strftime('%H:%M:%S')}] 👤 管理员 {uid} 访问主菜单")
     sync_from_github()
-    
     kb = [
-        [InlineKeyboardButton("📁 分组管理", callback_data='manage_g')],
+        [InlineKeyboardButton("📁 分组/成员管理", callback_data='manage_g')],
         [InlineKeyboardButton("🚀 执行群发", callback_data='start_bc')],
         [InlineKeyboardButton("🔄 刷新数据", callback_data='sync_now')]
     ]
@@ -144,13 +103,50 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     reply_markup = InlineKeyboardMarkup(kb)
     if update.callback_query:
-        await update.callback_query.answer()
         await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     else:
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     return MAIN_STATE
 
-# --- 群发逻辑 (带失败重试日志) ---
+# --- 分组与成员管理子菜单 ---
+async def manage_member_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = [[InlineKeyboardButton(f"📝 {m['remark']} ({m['g_name']})", callback_data=f"edit_{m['chat_id']}")] for m in DATA_CACHE['members']]
+    kb.append([InlineKeyboardButton("⬅️ 返回主菜单", callback_data='to_start')])
+    await update.callback_query.edit_message_text("👥 选择要管理的群组：", reply_markup=InlineKeyboardMarkup(kb))
+    return MANAGE_MEMBER_SELECT
+
+async def member_action_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    cid = int(query.data.replace("edit_", ""))
+    context.user_data['edit_cid'] = cid
+    member = next(m for m in DATA_CACHE['members'] if m['chat_id'] == cid)
+    
+    kb = [[InlineKeyboardButton(f"🏷 设为分组：{g}", callback_data=f"setkind_{g}")] for g in DATA_CACHE['groups']]
+    kb.append([InlineKeyboardButton("🗑 从数据库删除", callback_data="delete_mem")])
+    kb.append([InlineKeyboardButton("⬅️ 返回列表", callback_data='manage_g')])
+    
+    text = f"⚙️ **管理群组**\n名字: {member['remark']}\n当前分组: {member['g_name']}\nID: `{cid}`"
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    return MEMBER_ACTION
+
+async def do_member_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    cid = context.user_data.get('edit_cid')
+    member = next(m for m in DATA_CACHE['members'] if m['chat_id'] == cid)
+    
+    if query.data.startswith("setkind_"):
+        new_kind = query.data.replace("setkind_", "")
+        member['g_name'] = new_kind
+        msg = f"✅ 已将 {member['remark']} 移动至 【{new_kind}】"
+    elif query.data == "delete_mem":
+        DATA_CACHE['members'] = [m for m in DATA_CACHE['members'] if m['chat_id'] != cid]
+        msg = f"🗑 已将 {member['remark']} 从数据库移除"
+    
+    save_to_github()
+    await query.answer(msg, show_alert=True)
+    return await manage_member_list(update, context)
+
+# --- 群发逻辑 ---
 async def bc_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton(f"🚀 发送至：{g}", callback_data=f"do_{g}")] for g in DATA_CACHE['groups']]
     kb.append([InlineKeyboardButton("⬅️ 返回", callback_data='to_start')])
@@ -165,17 +161,14 @@ async def bc_get_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bc_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = context.user_data.get('bc_target')
     ids = [m['chat_id'] for m in DATA_CACHE['members'] if m['g_name'] == target]
-    
     msg = await update.message.reply_text(f"📣 正在向 {len(ids)} 个群组推送消息...")
     count = 0
     for cid in ids:
         try:
             await context.bot.copy_message(chat_id=cid, from_chat_id=update.message.chat_id, message_id=update.message.message_id)
             count += 1
-            await asyncio.sleep(0.1) # 频率控制
-        except Exception as e:
-            print(f"[{time.strftime('%H:%M:%S')}] ⚠️ 群发失败 ID {cid}: {e}")
-
+            await asyncio.sleep(0.1)
+        except: pass
     await msg.edit_text(f"✅ 发送任务结束\n成功数: {count} / {len(ids)}")
     return BCAST_MSG
 
@@ -186,22 +179,27 @@ def home(): return "Sunday Bot is running."
 def run_web(): app.run(host='0.0.0.0', port=8080)
 
 def main():
-    print(f"[{time.strftime('%H:%M:%S')}] 🚀 正在启动 Sunday Bot...")
     Thread(target=run_web).start()
-    
     app_tg = Application.builder().token(TOKEN).build()
     
-    # 注册群内管理指令
     app_tg.add_handler(CommandHandler("set_group", set_group_to_db))
-    app_tg.add_handler(CommandHandler("set_kind", set_group_kind))
+    app_tg.add_handler(CommandHandler("set_kind", lambda u, c: u.message.reply_text("💡 请前往私聊机器人输入 /start，在'分组管理'中直接点击设置。")))
 
-    # 私聊菜单逻辑
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
             MAIN_STATE: [
-                CallbackQueryHandler(start, pattern='^to_start$|^sync_now$'),
+                CallbackQueryHandler(start, pattern='^sync_now$'),
+                CallbackQueryHandler(manage_member_list, pattern='^manage_g$|^to_manage$'),
                 CallbackQueryHandler(bc_select, pattern='^start_bc$'),
+            ],
+            MANAGE_MEMBER_SELECT: [
+                CallbackQueryHandler(member_action_menu, pattern='^edit_'),
+                CallbackQueryHandler(start, pattern='^to_start$'),
+            ],
+            MEMBER_ACTION: [
+                CallbackQueryHandler(do_member_action, pattern='^setkind_|^delete_mem$'),
+                CallbackQueryHandler(manage_member_list, pattern='^manage_g$'),
             ],
             BCAST_GROUP: [CallbackQueryHandler(bc_get_msg, pattern='^do_'), CallbackQueryHandler(start, pattern='^to_start$')],
             BCAST_MSG: [MessageHandler(filters.ALL & ~filters.COMMAND, bc_do), CallbackQueryHandler(start, pattern='^to_start$')],
@@ -211,7 +209,7 @@ def main():
     )
     
     app_tg.add_handler(conv)
-    print(f"[{time.strftime('%H:%M:%S')}] 🤖 监听中，请使用 /set_group 登记群组。")
+    print(f"[{time.strftime('%H:%M:%S')}] 🤖 监听中，/set_group 已升级。")
     app_tg.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__': main()
