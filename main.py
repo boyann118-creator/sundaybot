@@ -68,6 +68,15 @@ async def set_group_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     custom_name = " ".join(context.args) if context.args else chat.title
     sync_from_github()
+
+    # --- 新增：检查备注名是否重复 ---
+    # 查找是否有其他群组（ID不同）已经占用了这个名字
+    duplicate_name = next((m for m in DATA_CACHE['members'] if m['remark'] == custom_name and m['chat_id'] != chat.id), None)
+    if duplicate_name:
+        await update.message.reply_text(f"⚠️ **入庫失敗**：名字【{custom_name}】已被其他群組佔用，請換個名字！", parse_mode="Markdown")
+        return
+    # ----------------------------
+
     existing = next((m for m in DATA_CACHE['members'] if m['chat_id'] == chat.id), None)
     if not existing:
         DATA_CACHE['members'].append({"chat_id": chat.id, "remark": custom_name, "g_name": "未分類"})
@@ -76,8 +85,11 @@ async def set_group_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         old_name = existing['remark']
         existing['remark'] = custom_name
         msg = f"🔄 **備註已更新**\n原名: {old_name}\n現名: {custom_name}\n分組: {existing['g_name']}"
-    if save_to_github(): await update.message.reply_text(msg, parse_mode="Markdown")
-    else: await update.message.reply_text("❌ 保存失敗，請檢查 GitHub Token")
+        
+    if save_to_github(): 
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    else: 
+        await update.message.reply_text("❌ 保存失敗，請檢查 GitHub Token")
 
 # --- 5. 管理控制台逻辑 ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
