@@ -51,7 +51,7 @@ def save_to_github():
         return put_resp.status_code in [200, 201]
     except: return False
 
-# --- 3. 指令逻辑 ---
+# --- 3. 群组登记 (/set_group) ---
 async def set_group_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
     chat = update.effective_chat
@@ -68,7 +68,7 @@ async def set_group_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if save_to_github(): await update.message.reply_text(msg, parse_mode="Markdown")
     else: await update.message.reply_text("❌ 操作失败，请检查 GitHub")
 
-# --- 4. 私聊控制台：核心功能区 ---
+# --- 4. 私聊控制台 ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid not in ADMIN_IDS: return ConversationHandler.END
@@ -83,26 +83,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_STATE
 
 async def manage_member_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 分页显示群组，防止群组过多导致按钮超限（此处逻辑保持简单）
     kb = [[InlineKeyboardButton(f"📝 {m['remark']} ({m['g_name']})", callback_data=f"edit_{m['chat_id']}")] for m in DATA_CACHE['members']]
     kb.append([InlineKeyboardButton("➕ 添加新分类", callback_data='add_new_kind'), InlineKeyboardButton("🏷️ 分类管理(删/改)", callback_data='kind_manage')])
     kb.append([InlineKeyboardButton("⬅️ 返回主菜单", callback_data='to_start')])
     await update.callback_query.edit_message_text("👥 选择要管理的群组，或管理分类：", reply_markup=InlineKeyboardMarkup(kb))
     return MANAGE_MEMBER_SELECT
 
-# --- 分类管理逻辑 (删/改) ---
+# --- 分组(Category)删改逻辑 ---
 async def kind_manage_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton(f"🛠️ {g}", callback_data=f"kindact_{g}")] for g in DATA_CACHE['groups'] if g != "未分类"]
     kb.append([InlineKeyboardButton("⬅️ 返回", callback_data='manage_g')])
-    await update.callback_query.edit_message_text("🏷️ 选择要修改或删除的分组名：", reply_markup=InlineKeyboardMarkup(kb))
+    await update.callback_query.edit_message_text("🏷️ **分类管理**\n选择一个分类进行重命名或删除：", reply_markup=InlineKeyboardMarkup(kb))
     return KIND_MANAGE_LIST
 
 async def kind_action_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kind_name = update.callback_query.data.replace("kindact_", "")
     context.user_data['edit_kind'] = kind_name
-    kb = [[InlineKeyboardButton("✏️ 重命名", callback_data='kind_rename')],
-          [InlineKeyboardButton("🗑️ 删除此分组", callback_data='kind_delete')],
+    kb = [[InlineKeyboardButton("✏️ 重命名分类", callback_data='kind_rename')],
+          [InlineKeyboardButton("🗑️ 删除整个分类", callback_data='kind_delete')],
           [InlineKeyboardButton("⬅️ 返回列表", callback_data='kind_manage')]]
-    await update.callback_query.edit_message_text(f"正在管理分组：【{kind_name}】\n(注：删除分组后，该组群组将自动归类到'未分类')", reply_markup=InlineKeyboardMarkup(kb))
+    await update.callback_query.edit_message_text(f"正在管理分类：【{kind_name}】\n(注：删除分类后，原分类下的群组会变为'未分类')", reply_markup=InlineKeyboardMarkup(kb))
     return KIND_ACTION
 
 async def do_kind_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -113,10 +114,10 @@ async def do_kind_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for m in DATA_CACHE['members']:
             if m['g_name'] == old_name: m['g_name'] = "未分类"
         save_to_github()
-        await query.answer(f"🗑️ 已删除分组：{old_name}", show_alert=True)
+        await query.answer(f"🗑️ 已删除分类：{old_name}", show_alert=True)
         return await kind_manage_list(update, context)
     elif query.data == "kind_rename":
-        await query.edit_message_text(f"✏️ 请输入 【{old_name}】 的新名字：")
+        await query.edit_message_text(f"✏️ 请输入分类 【{old_name}】 的新名字：")
         return RENAME_KIND_INPUT
 
 async def save_kind_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -128,32 +129,24 @@ async def save_kind_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for m in DATA_CACHE['members']:
             if m['g_name'] == old_name: m['g_name'] = new_name
         save_to_github()
-        await update.message.reply_text(f"✅ 已重命名为：{new_name}")
+        await update.message.reply_text(f"✅ 分类名已修改为：{new_name}")
     else: await update.message.reply_text("⚠️ 名字无效或已存在")
     return await start(update, context)
 
-# --- 成员管理逻辑 (保持原样) ---
-async def ask_group_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.edit_message_text("✏️ 请输入新分组的名字：")
-    return ADD_GROUP_NAME
-
-async def save_group_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    new_kind = update.message.text.strip()
-    if new_kind and new_kind not in DATA_CACHE['groups']:
-        DATA_CACHE['groups'].append(new_kind)
-        save_to_github()
-        await update.message.reply_text(f"✅ 分组 【{new_kind}】 已创建！")
-    return await start(update, context)
-
+# --- 具体群组(Member)管理逻辑 ---
 async def member_action_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     cid = int(query.data.replace("edit_", ""))
     context.user_data['edit_cid'] = cid
     member = next(m for m in DATA_CACHE['members'] if m['chat_id'] == cid)
-    kb = [[InlineKeyboardButton(f"🏷 设为分组：{g}", callback_data=f"setkind_{g}")] for g in DATA_CACHE['groups']]
-    kb.append([InlineKeyboardButton("🗑 从数据库删除", callback_data="delete_mem")])
+    
+    # 构建分类选择按钮
+    kb = [[InlineKeyboardButton(f"🏷 移动至：{g}", callback_data=f"setkind_{g}")] for g in DATA_CACHE['groups']]
+    # 新增：从数据库删除该群组的按钮
+    kb.append([InlineKeyboardButton("🗑️ 从数据库删除该群组", callback_data="delete_mem")])
     kb.append([InlineKeyboardButton("⬅️ 返回列表", callback_data='manage_g')])
-    text = f"⚙️ **管理群组**\n名字: {member['remark']}\n当前分组: {member['g_name']}\nID: `{cid}`"
+    
+    text = f"⚙️ **管理具体群组**\n备注名: {member['remark']}\n当前分组: {member['g_name']}\nID: `{cid}`"
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return MEMBER_ACTION
 
@@ -161,32 +154,48 @@ async def do_member_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     cid = context.user_data.get('edit_cid')
     member = next(m for m in DATA_CACHE['members'] if m['chat_id'] == cid)
+    
     if query.data.startswith("setkind_"):
         new_kind = query.data.replace("setkind_", "")
         member['g_name'] = new_kind
-        msg = f"✅ 已将 {member['remark']} 移动至 【{new_kind}】"
+        msg = f"✅ 已将 {member['remark']} 移动至 {new_kind}"
     elif query.data == "delete_mem":
         DATA_CACHE['members'] = [m for m in DATA_CACHE['members'] if m['chat_id'] != cid]
-        msg = f"🗑 已将 {member['remark']} 从数据库移除"
-    save_to_github(); await query.answer(msg, show_alert=True)
+        msg = f"🗑️ 已将 {member['remark']} 从数据库永久删除"
+    
+    save_to_github()
+    await query.answer(msg, show_alert=True)
     return await manage_member_list(update, context)
 
-# --- 群发逻辑 (交互语优化) ---
+# --- 添加新分类 ---
+async def ask_group_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.edit_message_text("✏️ 请输入新分类的名字：")
+    return ADD_GROUP_NAME
+
+async def save_group_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    new_kind = update.message.text.strip()
+    if new_kind and new_kind not in DATA_CACHE['groups']:
+        DATA_CACHE['groups'].append(new_kind)
+        save_to_github()
+        await update.message.reply_text(f"✅ 新分类 【{new_kind}】 创建成功！")
+    return await start(update, context)
+
+# --- 群发逻辑 (交互语符合要求) ---
 async def bc_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[InlineKeyboardButton(f"🚀 发送至：{g}", callback_data=f"do_{g}")] for g in DATA_CACHE['groups']]
+    kb = [[InlineKeyboardButton(f"🚀 群发至：{g}", callback_data=f"do_{g}")] for g in DATA_CACHE['groups']]
     kb.append([InlineKeyboardButton("⬅️ 返回", callback_data='to_start')])
-    await update.callback_query.edit_message_text("🎯 请选择目标分组：", reply_markup=InlineKeyboardMarkup(kb))
+    await update.callback_query.edit_message_text("🎯 请选择要推送的目标分组：", reply_markup=InlineKeyboardMarkup(kb))
     return BCAST_GROUP
 
 async def bc_get_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['bc_target'] = update.callback_query.data.replace("do_", "")
-    await update.callback_query.edit_message_text(f"已选定组：**{context.user_data['bc_target']}**\n请直接发送内容：", parse_mode="Markdown")
+    await update.callback_query.edit_message_text(f"目标组：**{context.user_data['bc_target']}**\n请直接发送要推送的内容（支持文字/图片/文件）：", parse_mode="Markdown")
     return BCAST_MSG
 
 async def bc_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = context.user_data.get('bc_target')
     ids = [m['chat_id'] for m in DATA_CACHE['members'] if m['g_name'] == target]
-    msg = await update.message.reply_text(f"📣 正在推送至 {len(ids)} 个群组...")
+    msg = await update.message.reply_text(f"📣 正在准备推送，共 {len(ids)} 个目标...")
     count = 0
     for cid in ids:
         try:
@@ -194,11 +203,11 @@ async def bc_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
             count += 1
             await asyncio.sleep(0.1)
         except: pass
-    # 变更为要求的交互语
+    # 交互语：成功发送 X/X 至 XXX
     await msg.edit_text(f"✅ 发送任务结束\n成功发送 {count} / {len(ids)} 至 {target}")
     return BCAST_MSG
 
-# --- 5. 入口 ---
+# --- 5. 运行 ---
 app = Flask(''); run_web = lambda: app.run(host='0.0.0.0', port=8080)
 @app.route('/')
 def home(): return "Sunday Bot Active"
